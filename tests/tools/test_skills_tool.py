@@ -1042,6 +1042,20 @@ class TestSameRootDuplicationResolves:
         assert result["path"] == "arxiv/SKILL.md"
         assert "IDENTICAL COPY" in result["content"]
 
+    def test_equal_depth_identical_copies_resolve_deterministically(self, tmp_path):
+        local_dir = tmp_path / "local"
+        local_dir.mkdir()
+        _make_skill(local_dir, "dup", category="cat-b", body="IDENTICAL COPY")
+        _make_skill(local_dir, "dup", category="cat-a", body="IDENTICAL COPY")
+
+        p1, p2 = self._patch_dirs(local_dir)
+        with p1, p2:
+            result = json.loads(skill_view("dup"))
+
+        assert result["success"] is True, result
+        assert result["path"] == "cat-a/dup/SKILL.md"
+        assert "IDENTICAL COPY" in result["content"]
+
     def test_different_skill_with_same_frontmatter_name_in_same_root_refuses(self, tmp_path):
         """A shallower ``evil/SKILL.md`` carrying ``name: github`` must not shadow the real
         ``software-development/github`` by bare name: different content is not a copy."""
@@ -1090,6 +1104,33 @@ class TestSameRootDuplicationResolves:
         assert "Ambiguous skill name 'dup': use one of cat-a/dup, cat-b/dup" in result["error"]
         assert result["load_names"] == ["cat-a/dup", "cat-b/dup"]
         assert len(result["matches"]) == 2
+
+    def test_explicit_profile_preference_resolves_only_the_bare_name(self, tmp_path):
+        local_dir = tmp_path / "local"
+        local_dir.mkdir()
+        _make_skill(local_dir, "dup", category="cat-a", body="A")
+        _make_skill(local_dir, "dup", category="cat-b", body="B")
+        p1, p2 = self._patch_dirs(local_dir)
+        with p1, p2, patch("agent.skill_utils._skills_cfg_get", side_effect=lambda key:
+                          {"dup": "cat-b/dup"} if key == "preferred_duplicate_skills" else None):
+            bare = json.loads(skill_view("dup"))
+            qualified = json.loads(skill_view("cat-a/dup"))
+        assert bare["success"] is True, bare
+        assert bare["path"] == "cat-b/dup/SKILL.md"
+        assert qualified["success"] is True, qualified
+        assert qualified["path"] == "cat-a/dup/SKILL.md"
+
+    def test_invalid_profile_preference_does_not_guess(self, tmp_path):
+        local_dir = tmp_path / "local"
+        local_dir.mkdir()
+        _make_skill(local_dir, "dup", category="cat-a", body="A")
+        _make_skill(local_dir, "dup", category="cat-b", body="B")
+        p1, p2 = self._patch_dirs(local_dir)
+        with p1, p2, patch("agent.skill_utils._skills_cfg_get", side_effect=lambda key:
+                          {"dup": "not-a-candidate"} if key == "preferred_duplicate_skills" else None):
+            result = json.loads(skill_view("dup"))
+        assert result["success"] is False, result
+        assert "Ambiguous" in result["error"]
 
 
 class TestTrustWarningSymlinkAware:

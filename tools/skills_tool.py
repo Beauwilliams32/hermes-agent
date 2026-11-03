@@ -525,7 +525,7 @@ def locate_skill(name: str, local_category_name: Optional[str], roots):
     if len(candidates) > 1:
         owned = [(c, _owning_search_dir(c[1], all_dirs)) for c in candidates]
         won, contenders = pick_skill_candidate([
-            (tier_of[root], str(root), skill_candidate_rank(c[1], root), c[1]) for c, root in owned])
+            (tier_of[root], str(root), skill_candidate_rank(c[1], root), c[1]) for c, root in owned], alias=name)
         if won is not None:
             if dropped := [str(smd) for i, (_sd, smd) in enumerate(candidates) if i != won]:
                 logger.info("Skill '%s' resolved to %s by precedence (project > local > create_dir > "
