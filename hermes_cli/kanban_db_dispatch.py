@@ -67,6 +67,19 @@ _RESPAWN_BLOCKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Outcomes that mean the worker made real forward progress: it finished the
+# work and handed it off (``completed`` / ``review_requested`` /
+# ``changes_requested``). A quota- or auth-flavoured ``last_failure_error``
+# stamped by an EARLIER run is stale once a later run has advanced the card.
+# The rate-limited requeue path writes that stamp WITHOUT incrementing
+# ``consecutive_failures`` precisely because it is informational, so treating
+# it as a live blocker parked a handed-off card forever: the guard read the
+# stale stamp BEFORE the review-lane early return, so a card in ``review``
+# could never be reviewed and re-guarded itself on every tick.
+_RESPAWN_PROGRESS_OUTCOMES = frozenset({
+    "completed", "review_requested", "changes_requested",
+})
+
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 
@@ -1566,7 +1579,9 @@ def check_respawn_guard(
     checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
     ``last_failure_error`` that would otherwise park the task forever — that
     path never increments ``consecutive_failures``), ``"blocker_auth"``
-    (quota/auth pattern; the breaker still trips eventually), then for the
+    (quota/auth pattern; the breaker still trips eventually — but NOT when
+    the latest run made forward progress, which means the stamp is stale
+    context from an earlier run), then for the
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
@@ -1620,7 +1635,14 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    # A forward-progress outcome means the card moved on after the run that
+    # wrote the stamp, so the stamp is stale context, not a live blocker.
+    if (
+        err
+        and latest_outcome not in _RESPAWN_PROGRESS_OUTCOMES
+        and latest_outcome != "crashed"
+        and _RESPAWN_BLOCKER_RE.search(err)
+    ):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
