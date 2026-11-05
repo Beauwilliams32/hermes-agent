@@ -29,6 +29,31 @@ def _kanban_config() -> dict:
         return {}
 
 
+def _resolve_failure_limit(args: argparse.Namespace) -> int:
+    """Effective consecutive-failure breaker threshold for the CLI dispatch path.
+
+    An explicit ``--failure-limit`` always wins. Otherwise honour
+    ``kanban.failure_limit`` from config.yaml, and only fall back to
+    ``DEFAULT_FAILURE_LIMIT`` when config does not set one.
+
+    This function exists because the argparse default used to be
+    ``DEFAULT_FAILURE_LIMIT`` itself: the flag therefore ALWAYS had a value,
+    so ``getattr(args, "failure_limit", DEFAULT_FAILURE_LIMIT)`` could never
+    fall through to config. The CLI path consequently ignored
+    ``kanban.failure_limit`` while ``kanban show`` reported it, so a card
+    documented as "max-retries: 3" was auto-blocked on the 2nd failure.
+    """
+    explicit = getattr(args, "failure_limit", None)
+    if explicit is not None:
+        try:
+            return int(explicit)
+        except (TypeError, ValueError):
+            pass
+    # Same semantics as the gateway dispatcher: honour kanban.failure_limit from
+    # config, fall back to the default when absent or invalid.
+    return kbd._positive_int(_kanban_config().get("failure_limit"), kbd.DEFAULT_FAILURE_LIMIT)
+
+
 def _poll_loop(interval: float, tick) -> int:
     """Run ``tick()`` every ``interval`` seconds (floor 0.1) until Ctrl-C."""
     try:
@@ -87,7 +112,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            failure_limit=_resolve_failure_limit(args),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
@@ -253,7 +278,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         kbd.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            failure_limit=_resolve_failure_limit(args),
             on_tick=_on_tick,
         )
     finally:
