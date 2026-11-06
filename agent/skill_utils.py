@@ -449,7 +449,7 @@ def skill_candidate_rank(skill_md, root) -> tuple[bool, int]:
     return (skill_md.name != "SKILL.md", len(skill_md.relative_to(root).parts))
 
 
-def pick_skill_candidate(candidates) -> tuple[Optional[int], list[int]]:
+def pick_skill_candidate(candidates, alias: Optional[str] = None) -> tuple[Optional[int], list[int]]:
     """Winner index among one identifier's ``(tier, root, rank, skill_md)`` candidates, plus the
     winning tier's contender indexes. The lowest tier wins; inside it a lone candidate wins, identical
     copies under one root resolve to the strictly best ``rank``, anything else is ambiguous (None)."""
@@ -457,9 +457,28 @@ def pick_skill_candidate(candidates) -> tuple[Optional[int], list[int]]:
     contenders = [i for i, c in enumerate(candidates) if c[0] == top]
     if len(contenders) > 1 and len({candidates[i][1] for i in contenders}) == 1 and provably_same_skill(
             [candidates[i][3] for i in contenders]):
-        ranked = sorted(contenders, key=lambda i: candidates[i][2])
-        if candidates[ranked[0]][2] != candidates[ranked[1]][2]:
-            return ranked[0], contenders
+        # Equal-depth copies with identical bytes are the same instruction set.
+        # Break that harmless tie by path so bare names remain usable without
+        # choosing between different authors or divergent skill contents.
+        ranked = sorted(contenders, key=lambda i: (candidates[i][2], str(candidates[i][3])))
+        return ranked[0], contenders
+    # A profile may explicitly resolve a divergent bare-name collision to one
+    # exact relative path. Keep all copies addressable by qualified path. This
+    # never overrides a higher-precedence tier or guesses from an import folder.
+    if len(contenders) > 1 and alias and "/" not in alias and ":" not in alias:
+        preferred = _skills_cfg_get("preferred_duplicate_skills")
+        target = preferred.get(alias) if isinstance(preferred, dict) else None
+        if isinstance(target, str) and target and not target.startswith("/"):
+            matching = []
+            for i in contenders:
+                try:
+                    rel = Path(candidates[i][3]).parent.relative_to(candidates[i][1]).as_posix()
+                except ValueError:
+                    continue
+                if rel == target:
+                    matching.append(i)
+            if len(matching) == 1:
+                return matching[0], contenders
     return (contenders[0] if len(contenders) == 1 else None), contenders
 
 
@@ -487,7 +506,7 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     for alias, idxs in owners.items():
         won, _ = pick_skill_candidate([
             (out[j]["tier"], str(out[j]["root"]), skill_candidate_rank(out[j]["path"], out[j]["root"]), out[j]["path"])
-            for j in idxs])
+            for j in idxs], alias=alias)
         winner[alias] = None if won is None else idxs[won]
     for i, e in enumerate(out):
         name, rel = str(e["name"]), e["relative_path"]

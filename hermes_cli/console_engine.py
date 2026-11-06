@@ -316,7 +316,7 @@ _CLI_FAMILIES: dict[str, tuple[_CliSurface, str]] = {
         "*init, boards list, *boards create, *boards rm, *boards switch, boards current, "
         "*boards rename, *boards set-workdir, *create, list, show, *assign, *reclaim, *reassign, "
         "diagnose, *link, *unlink, *claim, *comment, *complete, *edit, *block, *schedule, "
-        "*unblock, *promote, *archive, stats, runs, heartbeat, assignments, context"),
+        "*reclassify, *unblock, *promote, *archive, stats, runs, heartbeat, assignments, context"),
     "bundles": (_reg("bundles", "bundles_command"), "list, show, *create, *delete, *reload"),
     "checkpoints": (_reg("checkpoints"), "status, list, *prune, *clear, *clear-legacy"),
     "curator": (

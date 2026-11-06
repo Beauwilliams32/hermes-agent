@@ -323,6 +323,16 @@ _SPECS = [
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
     ], help="Mark one or more tasks blocked"),
+    _cmd("reclassify", [
+        _TASK_ID,
+        _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
+        _arg("--kind", required=True, choices=sorted(kb.VALID_BLOCK_KINDS),
+             help="New typed block reason. Re-types the block of an ALREADY-blocked "
+                  "card in place: status, failure history and terminal runs are kept, "
+                  "the card is NOT promoted, and the block becomes sticky so only an "
+                  "explicit 'kanban unblock' releases it. For correcting a stale kind, "
+                  "e.g. a leftover 'dependency' on a card whose parents are all done."),
+    ], help="Re-type the block of an already-blocked task without unblocking it"),
     _cmd("schedule", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
@@ -363,15 +373,16 @@ _SPECS = [
     _cmd("dispatch", [
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
-        _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
-             help=f"Auto-block a task after this many consecutive non-success attempts "
-                  f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
+        _arg("--failure-limit", type=int, default=None,
+             help="Auto-block a task after this many consecutive non-success attempts "
+                  "(spawn_failed, timed_out, or crashed). Defaults to kanban.failure_limit "
+                  f"from config.yaml, else {kbd.DEFAULT_FAILURE_LIMIT}"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
     _cmd("daemon", [
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),
-        _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT),
+        _arg("--failure-limit", type=int, default=None),
         _arg("--pidfile", help="Write the daemon's PID to this file on start"),
         _arg("--verbose", "-v", action="store_true", help="Log each tick's outcome to stdout"),
         # Escape hatch for hosts that truly cannot run the gateway; hidden from

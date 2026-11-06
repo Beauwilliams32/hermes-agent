@@ -2002,11 +2002,56 @@ def list_jobs(include_disabled: bool = False) -> list[dict[str, Any]]:
     return jobs
 
 
+def _repeat_budget_state(job: dict[str, Any]) -> tuple[int, int] | None:
+    """Return ``(completed, times)`` for a recurring job with a finite repeat budget.
+
+    ``None`` means the record has no finite budget to speak of: either the schedule is not
+    recurring (a one-shot has no future occurrences at all) or ``repeat.times`` is ``None``
+    (run forever). Those two cases are genuinely terminal and stay blocked.
+    """
+    if (job.get("schedule") or {}).get("kind") not in {"cron", "interval"}:
+        return None
+    repeat = job.get("repeat") or {}
+    times = repeat.get("times")
+    if times is None:
+        return None
+    try:
+        return int(repeat.get("completed") or 0), int(times)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_repeat_budget_extended_recurring_job(job: dict[str, Any]) -> bool:
+    """True for a recurring job whose repeat budget has been RAISED above what it has spent.
+
+    A recurring job with a finite ``repeat.times`` sets ``state=completed`` once
+    ``repeat.completed`` reaches that cap. It has not run out of OCCURRENCES - it ran out of
+    BUDGET, and it still has a schedule with future slots. Treating it as terminal wedges it
+    permanently: ``update_job`` refuses to reactivate it, and every resume path
+    (``cron resume``, ``cron resume --run-now``, ``cron resume --at``) routes through
+    ``update_job`` and fails the same way. The only way out was to edit the jobs file by hand.
+
+    The exemption is deliberately narrow: the budget must have been RAISED, so
+    ``completed < times``. A job whose budget is exactly spent stays exactly as blocked as it
+    was (``test_exhausted_recurring_job_trigger_is_refused`` pins that), and a one-shot stays
+    blocked because it has no future occurrence.
+
+    Recovery is therefore: ``hermes cron edit <id> --repeat <larger N>`` raises the cap, and
+    the next resume reactivates the job on its existing schedule.
+    """
+    budget = _repeat_budget_state(job)
+    if budget is None:
+        return False
+    completed, times = budget
+    return completed < times
+
+
 def _reject_terminal_activation(job: dict[str, Any], updated: dict[str, Any], job_id: str) -> None:
     """A genuinely terminal job cannot be reactivated through update_job (use cron resume)."""
     if (
         is_terminal_job(job)
         and not _is_recoverable_error_job(job)
+        and not _is_repeat_budget_extended_recurring_job(updated)
         and (
             updated.get("state") not in {"completed", "error"}
             or updated.get("enabled") is True
