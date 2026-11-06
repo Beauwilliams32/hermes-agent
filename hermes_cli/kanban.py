@@ -19,6 +19,7 @@ from typing import Optional
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_reclassify as kbr
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
@@ -208,7 +209,7 @@ def _profile_author() -> str:
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
-    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
+    "reclassify", "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review",
     "gc",
@@ -1006,6 +1007,23 @@ def _cmd_block(args: argparse.Namespace) -> int:
         return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
 
 
+def _cmd_reclassify(args: argparse.Namespace) -> int:
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return _err("kanban reclassify is orchestrator-only; workers must hand off their assigned task")
+    reason = _joined_words(args.reason)
+    kind = getattr(args, "kind", None)
+    author = _profile_author() if reason else None
+    suffix = f": {reason}" if reason else ""
+    with kbc.connect_closing() as conn:
+        op = _commented(conn, reason, author, "RECLASSIFIED", lambda tid: kbr.reclassify_block(
+            conn, tid, kind=kind, reason=reason))
+        return _ok_or_err(
+            op(args.task_id),
+            f"cannot reclassify {args.task_id} (not blocked, or already {kind}?)",
+            f"Reclassified {args.task_id} as {kind}{suffix}",
+        )
+
+
 def _cmd_schedule(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     author = _profile_author()
@@ -1327,6 +1345,7 @@ _HANDLERS = {
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
+    "reclassify": _cmd_reclassify,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
@@ -1355,6 +1374,7 @@ Common subcommands:
   `complete <id>…`      Mark task(s) done
   `request-review <id>` Enter first-class review; `request-changes <id> <reason>` returns an active review to its implementer
   `block <id> [reason]` Mark blocked; `schedule <id> [reason]` parks time-delay work; `unblock <id>` to revive
+  `reclassify <id> --kind <k>` Re-type the wait of an already-blocked card (stays blocked; keeps failure history)
   `assign <id> <profile>`  Reassign
   `boards list`         Show all boards
   `assignees`           Known profiles + counts

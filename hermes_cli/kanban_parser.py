@@ -323,6 +323,16 @@ _SPECS = [
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
     ], help="Mark one or more tasks blocked"),
+    _cmd("reclassify", [
+        _TASK_ID,
+        _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
+        _arg("--kind", required=True, choices=sorted(kb.VALID_BLOCK_KINDS),
+             help="New typed block reason. Re-types the block of an ALREADY-blocked "
+                  "card in place: status, failure history and terminal runs are kept, "
+                  "the card is NOT promoted, and the block becomes sticky so only an "
+                  "explicit 'kanban unblock' releases it. For correcting a stale kind, "
+                  "e.g. a leftover 'dependency' on a card whose parents are all done."),
+    ], help="Re-type the block of an already-blocked task without unblocking it"),
     _cmd("schedule", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
