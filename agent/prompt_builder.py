@@ -23,13 +23,12 @@ from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
-    TIER_LOCAL, clip_skill_description, extract_skill_conditions, extract_skill_description,
-    get_disabled_skill_names, get_skill_search_roots,
+    TIER_LOCAL, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_skill_search_roots,
     iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
     skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
-from utils import atomic_json_write, file_cache_version
+from utils import atomic_json_write, file_signature
 
 logger = logging.getLogger(__name__)
 
@@ -171,11 +170,9 @@ DEFAULT_AGENT_IDENTITY = (
 HERMES_AGENT_HELP_GUIDANCE = (
     # Injected only when skill_view exists AND the hermes-agent skill is installed (system_prompt.py slot
     # resolution). No "when the two differ" clause: docs-are-authoritative already carries the precedence.
-    # Names Hermes Agent without restating identity: SOUL.md line 1 already says who you are, while a custom
-    # persona (no Hermes identity line) still learns from "Hermes Agent itself" + "your own features" what it runs on.
-    "For help with Hermes Agent itself — configuring, setting up, using, extending, or troubleshooting it — "
-    "or to understand your own features, tools, or capabilities, the documentation at "
-    "https://hermes-agent.nousresearch.com/docs is your "
+    "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, "
+    "setting up, using, extending, or troubleshooting it — or when you need to understand your own features, "
+    "tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is your "
     "authoritative reference and always holds the latest, most up-to-date information. The `hermes-agent` "
     "skill has the actual commands and proven workflows — load it with skill_view(name='hermes-agent') "
     "before configuring, modifying, or troubleshooting Hermes so you don't guess or invent workarounds."
@@ -183,9 +180,9 @@ HERMES_AGENT_HELP_GUIDANCE = (
 
 # Variant for sessions without the skills toolset (e.g. Blank Slate): naming skill_view() there would dangle.
 HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
-    "For help with Hermes Agent itself — configuring, setting up, using, extending, or troubleshooting it — "
-    "or to understand your own features, tools, or capabilities, the documentation at "
-    "https://hermes-agent.nousresearch.com/docs is the "
+    "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, "
+    "setting up, using, extending, or troubleshooting it — or when you need to understand your own features, "
+    "tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is the "
     "authoritative reference and always holds the latest, most up-to-date information. Point the user there "
     "(or read it yourself if you have a way to fetch web content)."
 )
@@ -245,7 +242,7 @@ SESSION_SEARCH_GUIDANCE = (
 # The opening sentence is worded deliberately: Anthropic's server-side filter rejected the previous phrasing
 # ("After completing a complex task (5+ tool calls)... save the approach as a skill...") on subscription OAuth
 # credentials, surfacing as a billing-shaped HTTP 400. If you rewrite it, re-verify with a subscription OAuth
-# token — sk-ant-api keys do not hit the filter.
+# token — sk-ant-api keys do not hit the filter. The safety-rule heading is referenced by tests and compaction summaries.
 # Anthropic's server-side content filter rejects the previous phrasing ("After completing a complex task (5+
 # tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill
 # with skill_manage so you can reuse it next time.") on subscription OAuth credentials, and surfaces that
@@ -255,10 +252,16 @@ SESSION_SEARCH_GUIDANCE = (
 # not understood — if you rewrite this sentence, re-verify against a subscription OAuth token, not an
 # sk-ant-api… key, which does not hit the filter. Dieted (#95681, maintainer-directed): the record-it /
 # patch-it coaching that used to open this block duplicated the ## Skills section (which teaches both "offer
-# to save as a skill" and "fix it with skill_manage(action='patch')") and skill_manage's own schema. The
-# [SKILL_PRUNED] reload rule that followed moved to the compaction summary, the only place markers exist
-# (agent/context_compressor_tail.py::with_skill_safety_rule): fresh sessions no longer pay for it.
-SKILLS_GUIDANCE = "When you work out a non-trivial workflow, record it with skill_manage for future reuse."
+# to save as a skill" and "fix it with skill_manage(action='patch')") and skill_manage's own schema. Only
+# the compaction-pruning contract lives here — nothing else teaches it.
+SKILL_SAFETY_HEADING = "## Skill Safety Rule"
+SKILLS_GUIDANCE = (
+    "When you work out a non-trivial workflow, record it with skill_manage for future reuse.\n\n"
+    f"{SKILL_SAFETY_HEADING}\n"
+    "A skill placeholder containing `[SKILL_PRUNED]` lost its content in context compression and is inaccessible — "
+    "reload it with skill_view(name='...') before acting on anything that depends on it. After reloading, ignore any "
+    "remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions."
+)
 
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
@@ -658,6 +661,14 @@ def hud_surface_note(valid_tool_names: set[str] | None = None,
 # swapped at the API boundary in _build_api_kwargs().
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
+_LOCAL_CRON_DELIVERY_NOTE = (
+    "Cron jobs scheduled from this session are LOCAL-ONLY: their output is saved (viewable via cronjob "
+    "action='list') but is NOT delivered back into this session — there is no live-delivery channel here. If "
+    "the user wants to be notified when a job runs, the job's `deliver` must target a gateway-connected "
+    "messaging platform (e.g. deliver='telegram' or 'all'). Do not promise that a deliver='origin' or "
+    "default-deliver cron job will message them in this session."
+)
+
 # Hints for core surfaces only. A messaging platform's hint ships with its plugin
 # (``PlatformEntry.platform_hint``, read by agent/system_prompt._default_platform_hint).
 PLATFORM_HINTS = {
@@ -672,15 +683,15 @@ PLATFORM_HINTS = {
         "You are in a plain terminal (CLI). Markdown does NOT render — asterisks, headers, and fences appear as "
         "literal characters, so write plain text (indentation and blank lines are your only layout tools). Files: "
         "there is no attachment channel and MEDIA:/path tags are NOT intercepted here (they print as literal text) — "
-        # The cron local-only delivery caveat lives in cronjob_manage's deliver description (deferred: paid
-        # only when the tool is loaded), not in every CLI/TUI prompt.
-        "deliver a file by stating its absolute path or URL in plain text; the user opens it themselves."
+        "deliver a file by stating its absolute path or URL in plain text; the user opens it themselves. "
+        f"{_LOCAL_CRON_DELIVERY_NOTE}"
     ),
     "tui": (
         # Same file-delivery reality as the CLI: no MEDIA: interception in tui/.
         "You are in the Hermes terminal UI (TUI). Files: there is no attachment channel and MEDIA:/path tags "
         "are NOT intercepted here (they print as literal text) — deliver a file by stating its absolute path "
-        "or URL in plain text."
+        "or URL in plain text. "
+        f"{_LOCAL_CRON_DELIVERY_NOTE}"
     ),
     "desktop": (
         # Every claim verified against the shipping renderer (inline-preview-directive.tsx). Widget text is
@@ -1078,8 +1089,8 @@ _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
-# duplicate-name resolution; v5 stores descriptions clipped at a word boundary. Older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 5
+# duplicate-name resolution. Older snapshots are rebuilt.
+_SKILLS_SNAPSHOT_VERSION = 4
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1110,7 +1121,7 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             try:
                 if filename in files:
                     st = os.stat(path)
-                    manifest[path[prefix_len:]] = list(file_cache_version(path, st, always_digest=True))
+                    manifest[path[prefix_len:]] = list(file_signature(st))
             except OSError:
                 pass
     return manifest
@@ -1211,7 +1222,7 @@ def _plugin_skill_prompt_rows(
             if not _skill_should_show(extract_skill_conditions(frontmatter), available_tools,
                                       available_toolsets, session_platform):
                 continue
-            desc = clip_skill_description(str(meta.get("description") or "").strip()) or extract_skill_description(frontmatter)
+            desc = str(meta.get("description") or "").strip() or extract_skill_description(frontmatter)
             rows.append((name, desc))
     except Exception:
         logger.debug("Plugin skill prompt rows unavailable", exc_info=True)
@@ -1233,6 +1244,7 @@ def _current_session_platform_hint() -> str:
 def build_skills_system_prompt(
     available_tools: set[str] | None = None, available_toolsets: set[str] | None = None,
     compact_categories: frozenset[str] | None = None, skills_dir_override: Path | None = None,
+    terminal_guidance: bool = False,
 ) -> str:
     """Compact skill index for the system prompt.
 
@@ -1259,7 +1271,7 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not extra_roots:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, extra_roots, available_tools, available_toolsets, compact_categories)
+            skills_dir, extra_roots, available_tools, available_toolsets, compact_categories, terminal_guidance)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1267,6 +1279,20 @@ def build_skills_system_prompt(
 
 def _entry_name(entry: dict) -> str:
     return entry.get("frontmatter_name") or entry.get("skill_name") or ""
+
+
+def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
+    """``description`` from every DESCRIPTION.md under *root*, keyed by category path."""
+    found: dict[str, str] = {}
+    for desc_file in iter_skill_index_files(root, "DESCRIPTION.md"):
+        try:
+            cat_desc = parse_frontmatter(desc_file.read_text(encoding="utf-8-sig"))[0].get("description")
+            if cat_desc:
+                rel = desc_file.relative_to(root)
+                found["/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"] = str(cat_desc).strip().strip("'\"")
+        except Exception as e:
+            logger.debug(log_fmt, desc_file, e)
+    return found
 
 
 def _scan_extra_root(root: Path, skill_files, tier: int, log_fmt: str) -> list[tuple[dict, bool]]:
@@ -1293,8 +1319,9 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
 
 
 def _render_skills_index(
-    skills_by_category: dict[str, list[tuple[str, str]]],
+    skills_by_category: dict[str, list[tuple[str, str]]], category_descriptions: dict[str, str],
     compact_categories: frozenset[str] | None, available_tools: set[str] | None, unloadable: list[str] = (),
+    terminal_guidance: bool = False,
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list. *unloadable* names (different skills
     sharing a name AND relative path within one tier — one root or several) get a rename note instead of a row skill_view would refuse."""
@@ -1312,23 +1339,19 @@ def _render_skills_index(
         hidden_note += (f"\n(A copy of {', '.join(unloadable)} is not listed: it shares both its name and its path "
                         "with a different skill in the same skills directory tier (e.g. another external_dirs entry), "
                         "so skill_view cannot load it — rename one.)")
-    # Don't name web_search when the session has no web tools (dangling reference).
-    _basic_tools = "terminal" if available_tools is not None and "web_search" not in available_tools else "web_search or terminal"
     index_lines = []
     for category in sorted(skills_by_category):
         entries = skills_by_category[category]
         if category in demoted:
             index_lines.append(f"  {category} [names only]: {', '.join(sorted({n for n, _ in entries}))}")
             continue
-        rows: dict[str, str] = {}
+        cat_desc = category_descriptions.get(category, "")
+        index_lines.append(f"  {category}: {cat_desc}" if cat_desc else f"  {category}:")
+        seen = set()
         for name, desc in sorted(entries, key=lambda x: x[0]):  # stable: first entry per name wins
-            rows.setdefault(name, desc)
-        # A one-skill category is a single top-level row: its header would only repeat what the row
-        # says (a skill at the top of the tree is its own category, so the name printed twice).
-        indent = "  " if len(rows) == 1 else "    "
-        if len(rows) > 1:
-            index_lines.append(f"  {category}:")
-        index_lines.extend(f"{indent}- {name}: {desc}" if desc else f"{indent}- {name}" for name, desc in rows.items())
+            if name not in seen:
+                seen.add(name)
+                index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
     from agent.oneshot_footprint import ONESHOT_SKILLS_LOAD_GUIDANCE, is_single_query_session
     if is_single_query_session():
         return (
@@ -1336,6 +1359,20 @@ def _render_skills_index(
             + "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
             + hidden_note
         )
+    if terminal_guidance:
+        return (
+            "## Skills\n"
+            "Use a named skill when the user requests it. Otherwise load a skill with skill_view(name) "
+            "when it directly applies and provides necessary procedures or context. "
+            "Avoid unrelated skills and follow the user's instructions for where skills are maintained. "
+            "For code changes, end with `Review:` and `Verification:` lines.\n"
+            "\n"
+            "<available_skills>\n"
+            + "\n".join(index_lines) + "\n"
+            "</available_skills>"
+            + hidden_note
+        )
+    basic_tools = "terminal" if available_tools is not None and "web_search" not in available_tools else "web_search or terminal"
     return (
         "## Skills\n"
         "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
@@ -1343,19 +1380,15 @@ def _render_skills_index(
         "loading — it is always better to have context you don't need than to miss critical steps, pitfalls, "
         "or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific "
         "commands, and proven workflows that outperform general-purpose approaches. Load the skill "
-        f"even if you think you could handle the task with basic tools like {_basic_tools}. "
+        f"even if you think you could handle the task with basic tools like {basic_tools}. "
         "Skills also encode the user's preferred approach, conventions, and quality standards for tasks like "
         "code review, planning, and testing — load them even for tasks you already know how to do, because "
         "the skill defines how it should be done here.\n"
         "If a skill has issues, fix it with skill_manage(action='patch').\n"
         "After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps, "
         "had wrong commands, or needed pitfalls you discovered, update it before finishing.\n"
-        "\n"
-        "<available_skills>\n"
-        + "\n".join(index_lines) + "\n"
-        "</available_skills>\n\n"
-        "Only proceed without loading a skill if genuinely none are relevant to the task."
-        + hidden_note
+        "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>\n\n"
+        "Only proceed without loading a skill if genuinely none are relevant to the task." + hidden_note
     )
 
 
@@ -1366,7 +1399,7 @@ def _oneshot_prompt_variant() -> bool:
 
 def _build_skills_system_prompt_inner(
     skills_dir: Path, extra_roots: list[tuple[int, Path]], available_tools: set[str] | None,
-    available_toolsets: set[str] | None, compact_categories: frozenset[str] | None,
+    available_toolsets: set[str] | None, compact_categories: frozenset[str] | None, terminal_guidance: bool = False,
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
@@ -1385,7 +1418,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
-        _oneshot_prompt_variant(), tuple(plugin_rows),
+        _oneshot_prompt_variant(), terminal_guidance, tuple(plugin_rows),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
@@ -1403,12 +1436,14 @@ def _build_skills_system_prompt_inner(
                 or not _skill_should_show(conditions, available_tools, available_toolsets, _platform_hint or None))
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
+    category_descriptions: dict[str, str] = {}
     # Disk snapshot (fast path) vs. full scan: both yield (entry, is_compatible) pairs so labeling runs identically.
     if snapshot is not None:
         # Platforms and app presence are host facts that change without SKILL.md changing: re-evaluate both.
         candidates = [(entry, skill_matches_platform_list(entry.get("platforms") or [])
                        and skill_matches_apps({"requires_apps": entry.get("requires_apps") or []}))
                       for entry in snapshot.get("skills", []) if isinstance(entry, dict)]
+        category_descriptions = {str(k): str(v) for k, v in (snapshot.get("category_descriptions") or {}).items()}
     else:
         candidates = []
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
@@ -1425,6 +1460,8 @@ def _build_skills_system_prompt_inner(
     rows += [({**entry, "tier": TIER_LOCAL, "root": skills_dir}, ok) for entry, ok in candidates]
     for tier, root in ((t, d) for t, d in extra_roots if t != TIER_PROJECT and d.exists()):
         rows += _scan_extra_root(root, iter_skill_index_files(root, "SKILL.md"), tier, "Error reading external skill %s: %s")
+        for cat, cat_desc in _read_category_descriptions(root, "Could not read external skill description %s: %s").items():
+            category_descriptions.setdefault(cat, cat_desc)
     resolved = resolve_skill_catalog([
         {**entry, "name": _entry_name(entry), "path": entry["root"] / entry["rel"],
          "visible": ok and not hides(entry.get("skill_name") or "", entry.get("conditions") or {})}
@@ -1441,16 +1478,18 @@ def _build_skills_system_prompt_inner(
                 listed.add(name)
                 skills_by_category.setdefault("plugin", []).append((name, desc))
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
+        category_descriptions.update(_read_category_descriptions(skills_dir, "Could not read skill description %s: %s"))
         try:
             atomic_json_write(_skills_prompt_snapshot_path(), {
                 "version": _SKILLS_SNAPSHOT_VERSION, "manifest": _build_skills_manifest(skills_dir),
-                "skills": [entry for entry, _ in candidates],
+                "skills": [entry for entry, _ in candidates], "category_descriptions": category_descriptions,
             })
         except Exception as e:
             logger.debug("Could not write skills prompt snapshot: %s", e)
 
     unloadable = sorted({e["name"] for e in visible_entries if not e["load_name"]})
-    result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable)
+    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools,
+                                  unloadable, terminal_guidance)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

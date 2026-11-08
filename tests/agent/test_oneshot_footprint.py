@@ -28,7 +28,8 @@ def test_oneshot_skills_prompt_drops_authoring_coaching(oneshot, interactive_pro
     prompt = build_skills_system_prompt(available_tools={"skill_view", "skills_list"}, skills_dir_override=_skills_dir(tmp_path))
     assert "demo-skill" in prompt and "skill_view" in prompt
     assert "skill_manage" not in prompt and "offer to save as a skill" not in prompt
-    assert "skill_manage" in interactive_prompt and "offer to save as a skill" in interactive_prompt
+    assert "Use a named skill when the user requests it" in interactive_prompt
+    assert "offer to save as a skill" not in interactive_prompt
 
 
 def _skills_dir(tmp_path):
@@ -42,7 +43,7 @@ def _skills_dir(tmp_path):
 def interactive_prompt(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION", raising=False)
     prompt = build_skills_system_prompt(available_tools={"skill_view", "skills_list", "skill_manage"},
-                                        skills_dir_override=_skills_dir(tmp_path))
+                                        skills_dir_override=_skills_dir(tmp_path), terminal_guidance=True)
     monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
     return prompt
 

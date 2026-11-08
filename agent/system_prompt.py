@@ -569,6 +569,13 @@ def _guidance_parts(agent: Any) -> list[str]:
     parts.append(_tool_guidance_block(agent))  # None/empty entries are dropped by _join_tier
     if not agent.valid_tool_names:
         return parts
+    if agent.platform == "cli" and not getattr(agent, "skip_context_files", False) and not owned_kanban_task():
+        parts.append(
+            "For code changes, inspect the actual change for correctness and scope, run an appropriate "
+            "focused check, and end with `Review:` naming what you inspected and `Verification:` naming "
+            "the checks and results or why they could not be run. Respect explicit file limits, including "
+            "for temporary files and tests."
+        )
     # Steering only lands inside tool results, so only reachable with tools; a one-shot has nobody to steer it.
     from agent.oneshot_footprint import agent_is_oneshot
     if not agent_is_oneshot(agent):
