@@ -1,5 +1,6 @@
 """Application requirements survive disk and in-process skill-index reuse."""
 
+import json
 import sys
 
 from hermes_platform import declaration
@@ -40,3 +41,34 @@ def test_application_gate_rechecks_snapshot_without_losing_description(tmp_path,
         assert "app-guide" not in build()
     finally:
         pb.clear_skills_system_prompt_cache(clear_snapshot=True)
+
+
+def test_old_skill_snapshot_rebuilds_with_category_descriptions(tmp_path, monkeypatch):
+    from agent import prompt_builder as pb
+
+    skills = tmp_path / "skills"
+    category = skills / "photography"
+    skill = category / "composition" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: composition\ndescription: Compose a strong frame.\n---\nSkill body.\n",
+        encoding="utf-8",
+    )
+    (category / "DESCRIPTION.md").write_text(
+        "---\ndescription: Photography workflows.\n---\n",
+        encoding="utf-8",
+    )
+    snapshot_path = tmp_path / "snapshot.json"
+    monkeypatch.setattr(pb, "_skills_prompt_snapshot_path", lambda: snapshot_path)
+    monkeypatch.setattr(pb, "get_disabled_skill_names", lambda *_: set())
+    snapshot_path.write_text(json.dumps({
+        "version": 4,
+        "manifest": pb._build_skills_manifest(skills),
+        "skills": [],
+    }), encoding="utf-8")
+
+    prompt = pb._build_skills_system_prompt_inner(skills, [], None, None, None, terminal_guidance=True)
+
+    assert "photography: Photography workflows." in prompt
+    refreshed = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert refreshed["category_descriptions"]["photography"] == "Photography workflows."
