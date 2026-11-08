@@ -557,8 +557,6 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
 
 
 
-
-
 # ---------------------------------------------------------------------------
 # Complete / block / unblock / archive / assign
 # ---------------------------------------------------------------------------

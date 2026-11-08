@@ -15,6 +15,7 @@ from pathlib import Path
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli.kanban_db_guard import rate_limit_retry_details
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
@@ -116,6 +117,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
+        retry_details = {
+            tid: rate_limit_retry_details(conn, tid) or {}
+            for tid, reason in res.respawn_guarded
+            if reason in {"rate_limit_cooldown", "invalid_rate_limit_timestamp"}
+        } if getattr(args, "json", False) else {}
     if getattr(args, "json", False):
         _print_json({
             **{k: getattr(res, k)
@@ -132,7 +138,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "auto_assigned_default": res.auto_assigned_default,
             "respawn_guarded": [
-                {"task_id": tid, "reason": reason}
+                {"task_id": tid, "reason": reason, **retry_details.get(tid, {})}
                 for (tid, reason) in res.respawn_guarded
             ],
             "rate_limited": res.rate_limited,
