@@ -1,9 +1,4 @@
-"""Spawn refusals must not be charged to the card.
-
-Split out of ``tests/hermes_cli/test_kanban_db.py`` (that file was already at
-its line budget) and made platform-independent: the behaviour under test is
-the Linux systemd path, which the host cannot reach on macOS.
-"""
+"""Linux systemd refusal handling for kanban worker spawns."""
 
 from __future__ import annotations
 
@@ -19,7 +14,6 @@ from hermes_cli import kanban_db_dispatch as kbd
 
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
-    """Isolated HERMES_HOME with an empty kanban DB."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -28,6 +22,7 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+@pytest.mark.platforms("linux")
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
@@ -39,11 +34,6 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
     failure on the same card still counts."""
     from tools import process_registry
 
-    # The refusal only exists on a systemd host: ``restart_safe_gateway_child_argv``
-    # returns ``in_process`` before the probe on every other platform, so the
-    # simulated path below would never run and the test's own fallback error
-    # would be charged to the card as an ordinary failure.
-    monkeypatch.setattr(process_registry, "_IS_LINUX", True)
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
     monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
