@@ -311,7 +311,8 @@ def _skills_prompt(agent: Any) -> str:
     except Exception:
         _compact_cats = frozenset()
     return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
-                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent),
+                                         terminal_guidance=agent.platform == "cli" and not owned_kanban_task())
 
 
 def _auto_load_parts(agent: Any) -> list[str]:
@@ -569,6 +570,13 @@ def _guidance_parts(agent: Any) -> list[str]:
     parts.append(_tool_guidance_block(agent))  # None/empty entries are dropped by _join_tier
     if not agent.valid_tool_names:
         return parts
+    if agent.platform == "cli" and not getattr(agent, "skip_context_files", False) and not owned_kanban_task():
+        parts.append(
+            "For code changes, inspect the actual change for correctness and scope, run an appropriate "
+            "focused check, and end with `Review:` naming what you inspected and `Verification:` naming "
+            "the checks and results or why they could not be run. Respect explicit file limits, including "
+            "for temporary files and tests."
+        )
     # Steering only lands inside tool results, so only reachable with tools.
     parts.append(STEER_CHANNEL_NOTE)
     # agent.tool_use_enforcement / agent.execution_guidance: "auto" (default)
