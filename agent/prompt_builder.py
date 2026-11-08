@@ -1290,7 +1290,7 @@ def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
             if cat_desc:
                 rel = desc_file.relative_to(root)
                 found["/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"] = str(cat_desc).strip().strip("'\"")
-        except Exception as e:
+        except (OSError, UnicodeError, ValueError, TypeError) as e:
             logger.debug(log_fmt, desc_file, e)
     return found
 
