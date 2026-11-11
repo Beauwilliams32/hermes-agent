@@ -14,8 +14,8 @@ from typing import Any
 from typing import Iterator
 from typing import Optional
 
-from hermes_cli import kanban_db as _kb
-
+# Import the board facade only when a guard is called. Managed workers import
+# dispatch -> guard before board has finished defining the dispatcher exports.
 
 # ---------------------------------------------------------------------------
 # Respawn guard constants
@@ -64,6 +64,8 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 
 def _guard_epoch(value: Any) -> Optional[int]:
     """Convert a stored guard timestamp, treating nonfinite values as unknown."""
+    from hermes_cli import kanban_db as _kb
+
     try:
         return _kb._to_epoch(value)
     except (OverflowError, ValueError):
@@ -113,6 +115,8 @@ def rate_limit_retry_details(
     conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
 ) -> Optional[dict]:
     """Return the latest quota retry estimate; this does not probe a provider."""
+    from hermes_cli import kanban_db as _kb
+
     return retry_details(
         _recent_finished_runs(conn, task_id), _kb._resolve_rate_limit_cooldown_seconds(), now,
     )
@@ -120,6 +124,8 @@ def rate_limit_retry_details(
 
 def record_guarded_event(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
     """Avoid writing the same unreadable-timestamp guard event on every tick."""
+    from hermes_cli import kanban_db as _kb
+
     if reason == "invalid_rate_limit_timestamp":
         last = conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? "
@@ -154,6 +160,8 @@ def check_respawn_guard(
     handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
+    from hermes_cli import kanban_db as _kb
+
     row = conn.execute(
         "SELECT last_failure_error FROM tasks WHERE id = ?",
         (task_id,),
