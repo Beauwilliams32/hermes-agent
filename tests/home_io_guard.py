@@ -48,6 +48,9 @@ _INTERPRETER_PREFIXES = tuple({
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
+# A source checkout inside the default home probes its adjacent sealed-payload manifest.
+# The probe may receive ENOENT, but must never open an existing live-home file.
+_PAYLOAD_MANIFEST_PATH = _normcase(os.fspath(Path(__file__).resolve().parent.parent.parent / "manifest.json"))
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -62,6 +65,23 @@ def _contains(path: str, prefix: str) -> bool:
     if path == prefix:
         return True
     return prefix.startswith(path) if path == os.sep else prefix.startswith(path + os.sep)
+
+
+def _is_absent_payload_manifest_probe(absolute: str, root: str, destructive: bool) -> bool:
+    """True for a read of the checkout's adjacent sealed-payload manifest.
+
+    The manifest lives beside the checkout inside the default home, so the
+    guard would refuse its probe. When the file does not exist the probe is
+    an ENOENT lookup, not a read of live state — it is answered as ENOENT
+    instead of refused. An existing manifest stays guarded, and a file that
+    appears after this check still cannot be opened.
+    """
+    return (
+        absolute == _PAYLOAD_MANIFEST_PATH
+        and root == os.path.dirname(absolute)
+        and not destructive
+        and not os.path.lexists(absolute)
+    )
 
 
 class HomeIOGuard:
@@ -124,7 +144,7 @@ class HomeIOGuard:
             # tree merely to decide that the original path was forbidden.
             for root in roots:
                 if _within(absolute, root):
-                    self.refuse(value)
+                    self._refuse_within_root(value, candidate, absolute, root, destructive)
             if resolved is None:
                 resolved = _normcase(os.path.realpath(absolute))
             if metadata and resolved in roots:
@@ -138,6 +158,18 @@ class HomeIOGuard:
                     self.refuse(value)
         finally:
             self.checking.active = False
+
+    def _refuse_within_root(self, value, candidate, absolute, root, destructive):
+        """Refuse *value* as live-home I/O, unless it is an absent-manifest probe.
+
+        A read of the checkout's adjacent sealed-payload manifest is answered
+        with ENOENT rather than refused: the manifest does not exist, so the
+        probe reads nothing. An existing manifest stays guarded, and a file
+        that appears after this check still cannot be opened.
+        """
+        if _is_absent_payload_manifest_probe(absolute, root, destructive):
+            raise FileNotFoundError(2, os.strerror(2), candidate)
+        self.refuse(value)
 
     def _refuse_installed_app_change(self, value, absolute):
         """Fail on a change to an installed app (already normalized, literal and resolved);

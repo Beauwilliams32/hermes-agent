@@ -120,6 +120,20 @@ def _conn_uses_path(
     return False
 
 
+def _board_dir_holds_board(path: Path) -> bool:
+    """True when *path* is a real board directory (it holds ``board.json``).
+
+    ``board.json`` is the canonical board identity. A directory without it
+    is a container (``_archived``) or a stray, so any ``kanban.db`` found
+    there is not a board database and must not be scanned as one.
+    """
+    from hermes_cli.kanban_db_boards import _dir_holds_board
+    try:
+        return bool(_dir_holds_board(path))
+    except OSError:
+        return False
+
+
 def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     """Every other board's ``kanban.db``. Raises ``OSError`` when the set is unknown.
 
@@ -136,8 +150,20 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     root = _kb.boards_root()
     if root.is_dir():
         for child in root.iterdir():
-            if child.is_dir():
-                candidates.append(child / "kanban.db")
+            if not child.is_dir():
+                continue
+            # The `default` board keeps its DB at <root>/kanban.db (already a
+            # candidate above); its directory holds metadata only.
+            if child.name == _kb.DEFAULT_BOARD:
+                continue
+            # Only a genuine board directory (one holding board.json) holds a
+            # board DB. Containers such as `_archived` and stray directories
+            # must not contribute candidates: a schema-less file there used to
+            # make the whole cross-board scan fail closed ("unknown"), which
+            # deferred workspace cleanup for EVERY board.
+            if not _board_dir_holds_board(child):
+                continue
+            candidates.append(child / "kanban.db")
     found: list[Path] = []
     seen: set[Path] = set()
     for path in candidates:
@@ -153,11 +179,31 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     return found
 
 
+def _has_tasks_table(conn: sqlite3.Connection) -> bool:
+    """True when the DB carries a ``tasks`` table.
+
+    A readable database without it (a 0-byte or otherwise schema-less file)
+    holds no workspace references at all — it cannot share a workspace.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    return row is not None
+
+
 def _other_board_uses_path(db_file: Path, task_id: str, key: str) -> bool:
     uri = db_file.as_uri() + "?mode=ro"
     other = sqlite3.connect(uri, uri=True, timeout=1.0)
     try:
         other.row_factory = sqlite3.Row
+        if not _has_tasks_table(other):
+            # No `tasks` table => no workspace rows => this DB references no
+            # workspace. Treating it as unreadable would fail closed for
+            # EVERY board and defer workspace cleanup globally, which is how
+            # one stray file froze cleanup. A genuinely corrupt file still
+            # raises here and stays fail-closed.
+            _kb._log.debug("board db %s has no tasks table; not a sharer", db_file)
+            return False
         return _conn_uses_path(other, task_id, key, exclude_task_id=False)
     finally:
         other.close()
