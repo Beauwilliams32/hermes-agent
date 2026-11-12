@@ -608,12 +608,22 @@ def _alibaba_identity_part(agent: Any) -> list[str]:
     ]
 
 
+def _canonical_cwd(raw: str | Path) -> str:
+    """The canonical spelling of a working directory.  macOS names one directory two ways
+    (``/var`` vs ``/private/var``, ``/tmp`` vs ``/private/tmp``), so workspace identity has to
+    compare canonical paths, not the spelling a caller happened to use."""
+    try:
+        return str(Path(raw).resolve())
+    except OSError:  # deleted cwd
+        return str(raw)
+
+
 def _workspace_pin_key() -> str:
     """The directory the workspace probe inspects, which is also the prompt's ``Current working
     directory``: a build with no cwd bound (launch dir) and a later one binding that same dir
     (TUI ``/compress``) are one workspace, not two."""
     try:
-        return str(resolve_context_cwd() or resolve_agent_cwd())
+        return _canonical_cwd(resolve_context_cwd() or resolve_agent_cwd())
     except OSError:  # deleted cwd
         return ""
 
@@ -663,7 +673,7 @@ def _seed_workspace_pin(agent: Any, key: str) -> None:
     if not prompt:
         return
     stored_cwd = runtime_host_value(prompt, "Current working directory")
-    if stored_cwd and stored_cwd != key:
+    if stored_cwd and _canonical_cwd(stored_cwd) != key:
         return
     block = _persisted_workspace_block(prompt, key)
     # Only a real snapshot is adopted: a prompt without one (built on a surface without the

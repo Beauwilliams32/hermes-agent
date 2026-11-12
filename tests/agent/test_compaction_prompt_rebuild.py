@@ -279,7 +279,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
             with patch("agent.prompt_builder.load_soul_md", return_value=""), env(other), \
                  patch("agent.system_prompt.resolve_context_cwd", return_value=other):
                 moved = self._pin_agent(_cached_system_prompt=None, _session_db=db)
-                self.assertIn(f"- Root: {other}", build_system_prompt(moved))
+                self.assertIn(f"- Root: {other.resolve()}", build_system_prompt(moved))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -300,7 +300,56 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
                        return_value=f"Host: x\nUser home directory: /h\nCurrent working directory: {repo}"), \
                  patch("agent.system_prompt.resolve_context_cwd", return_value=repo):
                 resumed = self._pin_agent(_cached_system_prompt=None, _session_db=db)
-                self.assertIn(f"- Root: {repo}", build_system_prompt(resumed))
+                self.assertIn(f"- Root: {repo.resolve()}", build_system_prompt(resumed))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_workspace_pin_key_canonicalizes_path_aliases(self):
+        """macOS names one directory two ways (``/var`` vs ``/private/var``): the pin key must
+        be the canonical spelling, or the same workspace reads as two."""
+        import tempfile, shutil
+        from pathlib import Path
+        from agent.system_prompt import _workspace_pin_key
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-pinned-alias-"))
+        try:
+            repo = _init_repo(tmp / "proj", "init commit")
+            alias = tmp / "alias"
+            alias.symlink_to(repo, target_is_directory=True)
+            with patch("agent.system_prompt.resolve_context_cwd", return_value=alias):
+                self.assertEqual(_workspace_pin_key(), str(repo.resolve()))
+            with patch("agent.system_prompt.resolve_context_cwd", return_value=repo):
+                self.assertEqual(_workspace_pin_key(), str(repo.resolve()))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_persisted_snapshot_is_adopted_when_the_cwd_spelling_differs(self):
+        """A resumed session whose persisted cwd is an alias of the live cwd is the same
+        workspace: the snapshot it already carries must be replayed, not re-probed."""
+        import tempfile, shutil
+        from pathlib import Path
+        from agent.system_prompt import build_system_prompt
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-pinned-alias-resume-"))
+        try:
+            repo = _init_repo(tmp / "proj", "init commit")
+            alias = tmp / "alias"
+            alias.symlink_to(repo, target_is_directory=True)
+
+            def env(cwd):
+                return patch("agent.prompt_builder.build_environment_hints",
+                             return_value=f"Host: x\nUser home directory: /h\nCurrent working directory: {cwd}")
+
+            with patch("agent.prompt_builder.load_soul_md", return_value=""), env(alias), \
+                 patch("agent.system_prompt.resolve_context_cwd", return_value=repo):
+                stored = build_system_prompt(self._pin_agent())
+                self.assertIn("Status: clean", stored)
+                (repo / "untracked.txt").write_text("wip\n")
+                db = SimpleNamespace(get_session=lambda sid: {"system_prompt": stored})
+                resumed = self._pin_agent(_cached_system_prompt=None, _session_db=db)
+                with patch("agent.prompt_builder.load_soul_md", return_value=""), env(alias), \
+                     patch("agent.system_prompt.resolve_context_cwd", return_value=repo):
+                    self.assertEqual(build_system_prompt(resumed), stored)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
