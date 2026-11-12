@@ -202,6 +202,37 @@ def test_resolving_a_path_entry_under_the_home_is_command_lookup(protected_home,
         guard.check(entry.parent, metadata=False)
 
 
+def test_absent_payload_manifest_probe_does_not_open_live_home(tmp_path, monkeypatch):
+    """The checkout's adjacent sealed-payload manifest probe may get ENOENT,
+    but an existing manifest, other home files, and writes remain protected."""
+    import tests.home_io_guard as guard_module
+
+    root = tmp_path / "protected"
+    root.mkdir()
+    manifest = root / "manifest.json"
+    guard = guard_module.HomeIOGuard(lambda: [root])
+    monkeypatch.setattr(guard_module, "_PAYLOAD_MANIFEST_PATH", os.path.normcase(str(manifest)), raising=False)
+
+    with pytest.raises(FileNotFoundError):
+        guard.check(manifest)
+    with monkeypatch.context() as patcher:
+        guard.install(patcher)
+        with pytest.raises(FileNotFoundError):
+            manifest.read_text(encoding="utf-8")
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            manifest.write_text("blocked", encoding="utf-8")
+    assert not manifest.exists()
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(manifest, destructive=True)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(root / "config.yaml")
+
+    manifest.write_text('{"repo":"secret"}', encoding="utf-8")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(manifest)
+    assert manifest.read_text(encoding="utf-8") == '{"repo":"secret"}'
+
+
 def test_checkout_inside_a_guarded_root_is_not_hermes_state():
     """The default install checks the repo out INSIDE the home (install.sh:
     INSTALL_DIR=$HERMES_HOME/hermes-agent): the checkout, its .venv and test

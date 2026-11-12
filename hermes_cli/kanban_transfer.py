@@ -61,7 +61,13 @@ def _placeholders(items) -> str:
 
 def _snapshot_db(source: Path, target: Path) -> None:
     """Consistent copy of ``source`` via the online-backup API (a file copy
-    would miss pages still in the ``-wal`` sidecar and could tear)."""
+    would miss pages still in the ``-wal`` sidecar and could tear).
+
+    ``sqlite3.connect()`` creates a missing file, so a vanished source used
+    to leave a 0-byte ``kanban.db`` behind instead of failing loudly.
+    """
+    if not source.is_file():
+        raise FileNotFoundError(f"kanban board database is missing: {source}")
     with contextlib.closing(sqlite3.connect(str(source))) as src, \
             contextlib.closing(sqlite3.connect(str(target))) as dst:
         src.backup(dst)
