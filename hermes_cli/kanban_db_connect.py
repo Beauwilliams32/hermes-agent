@@ -712,6 +712,46 @@ def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:
         raise ValueError(f"kanban board {slug!r} does not exist; create it with `hermes kanban boards create {slug}`")
 
 
+def _refuse_stray_board_db_creation(path: Path) -> None:
+    """Refuse to create a board DB at a path that is not a board's DB.
+
+    ``sqlite3.connect()`` creates a missing file, so opening a stray path
+    used to leave a 0-byte, schema-less ``kanban.db`` behind — e.g.
+    ``<root>/kanban/boards/default/kanban.db`` or
+    ``<root>/kanban/boards/_archived/kanban.db``. Such a file has no
+    ``tasks`` table and used to make every cross-board workspace scan fail
+    closed ("unknown"), deferring workspace cleanup for every board. Only a
+    board's own DB path may be created.
+    """
+    if path.exists():
+        return
+    try:
+        resolved = path.resolve()
+        boards_root = _kb.boards_root().resolve()
+    except OSError:
+        return
+    if boards_root not in resolved.parents:
+        return  # outside <root>/kanban/boards/ -> not a board directory
+    board_dir_path = resolved.parent
+    if board_dir_path == boards_root:
+        return
+    if board_dir_path.name == _kb.DEFAULT_BOARD:
+        raise ValueError(
+            f"refusing to create {path}: the default board's database is "
+            f"{_kb.kanban_home() / 'kanban.db'}"
+        )
+    from hermes_cli.kanban_db_boards import _dir_holds_board
+    try:
+        holds_board = bool(_dir_holds_board(board_dir_path))
+    except OSError:
+        holds_board = False
+    if not holds_board:
+        raise ValueError(
+            f"refusing to create {path}: {board_dir_path} is not a board "
+            "directory (no board.json)"
+        )
+
+
 def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
     every connection so a re-created file stays robust; the first connection
@@ -732,6 +772,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             raise PermissionError("Kanban descendants require an initialized board; ask its owner to initialize it")
         return conn
     _refuse_dead_board_resurrection(path, board)
+    _refuse_stray_board_db_creation(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, skip the
@@ -807,6 +848,7 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     _refuse_dead_board_resurrection(path, board)
+    _refuse_stray_board_db_creation(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
