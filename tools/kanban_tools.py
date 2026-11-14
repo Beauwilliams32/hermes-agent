@@ -553,7 +553,8 @@ def register_current_worker_from_env() -> bool:
     try:
         from hermes_cli import kanban_db_dispatch as kbd
         with _board(None, quiet_close=True) as (_kb, conn):
-            return kbd.adopt_worker_pid(conn, tid, run_id, os.getpid())
+            return kbd.adopt_worker_pid(conn, tid or "", run_id, os.getpid(),
+                                        claim_lock=os.environ.get("HERMES_KANBAN_CLAIM_LOCK", ""))
     except Exception:
         logger.debug("kanban worker registration for %s failed", tid, exc_info=True)
         return True

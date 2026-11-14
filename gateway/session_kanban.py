@@ -183,11 +183,13 @@ def bind_worker_context(frame):
             if (task is None or task.status != 'running' or task.current_run_id != context['run_id']
                     or task.claim_lock != context['claim_lock']):
                 raise RuntimeStoreError('stale_kanban_claim')
-            # The dispatcher's spawned worker stays the run's pid (reclaim, timeout and operator
-            # kills target it; ``_watch_submitter`` ties this interpreter's life to it). The bound
-            # interpreter is recorded beside it so a sweep can tell when the attempt is truly gone.
-            from hermes_cli.kanban_db_dispatch import UNVERIFIED_WORKER_FINGERPRINT, _process_fingerprint
-            fingerprint = _process_fingerprint(os.getpid()) or UNVERIFIED_WORKER_FINGERPRINT
+            # The dispatcher submitter remains in the spawn event; the bound interpreter
+            # is the process actually executing tools and must become the signal target.
+            from hermes_cli import kanban_db_dispatch as dispatch
+            if not dispatch.adopt_worker_pid(conn, task.id, context['run_id'], os.getpid(),
+                                             claim_lock=context['claim_lock']):
+                raise RuntimeStoreError('stale_kanban_claim')
+            fingerprint = dispatch._process_fingerprint(os.getpid()) or dispatch.UNVERIFIED_WORKER_FINGERPRINT
             kb._append_event(conn, task.id, 'worker_bound', {'pid': os.getpid(), 'claim_lock': context['claim_lock'],
                              'started_at': fingerprint}, run_id=context['run_id'])
             claimed = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed' ORDER BY id DESC LIMIT 1",
@@ -205,6 +207,18 @@ def bind_worker_context(frame):
 _TURNS_DONE = threading.Event()
 
 
+def _submitter_identity(conn, run_id):
+    """The dispatcher-owned process remains the handle after the interpreter replaces worker_pid."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE run_id=? AND kind='spawned' "
+        "ORDER BY id DESC LIMIT 1", (run_id,),
+    ).fetchone()
+    if row:
+        payload = json.loads(row[0])
+        return payload['pid'], payload.get('started_at')
+    return None
+
+
 def _watch_submitter(db, run_id):
     """The dispatcher's spawned worker is this attempt's handle: killing it (an operator, a
     timeout, an OOM kill) must end the attempt, as it did when the worker ran the agent itself.
@@ -217,10 +231,15 @@ def _watch_submitter(db, run_id):
         with closing(sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
             while not _TURNS_DONE.wait(1.0):
                 try:
-                    row = conn.execute('SELECT worker_pid, worker_started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+                    identity = _submitter_identity(conn, run_id)
+                    if identity is None:
+                        row = conn.execute('SELECT worker_pid, worker_started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+                        identity = (row[0], row[1]) if row else None
                 except sqlite3.Error:
                     continue
-                if row and row[0] and row[0] != os.getpid() and not _worker_alive(row[0], row[1]):
+                except (ValueError, TypeError, KeyError):
+                    os._exit(1)  # Corrupt spawn identity: never keep executing an unowned turn.
+                if identity and identity[0] and identity[0] != os.getpid() and not _worker_alive(*identity):
                     os._exit(1)
     threading.Thread(target=watch, name='kanban-submitter-watch', daemon=True).start()
 
