@@ -381,6 +381,15 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
         return True
 
 
+def _claim_is_local(claim_lock, pid, started_at) -> bool:
+    """A changed hostname must not hide a worker whose boot-bound identity is verified here."""
+    return bool(claim_lock) and (
+        str(claim_lock).startswith(_kb._host_prefix())
+        or (bool(pid) and isinstance(started_at, str) and "|" in started_at
+            and _kb._pid_alive(pid) and not _pid_recycled(pid, started_at))
+    )
+
+
 def _kill_fn(signal_fn) -> Optional[Callable[[int, int], None]]:
     """``signal_fn`` test hook, else ``os.kill`` when the platform has one."""
     if signal_fn is not None:
@@ -429,13 +438,27 @@ def _terminate_reclaimed_worker(
     }
     if not pid or pid <= 0 or not claim_lock:
         return info
-    if not str(claim_lock).startswith(_kb._host_prefix()):
+    if not _claim_is_local(claim_lock, pid, started_at):
         return info
     info["host_local"] = True
 
     kill = _kill_fn(signal_fn)
     if kill is None:
         return info
+    if signal_fn is None and not _kb._IS_WINDOWS and started_at is not None:
+        # Both the submitter and the bound managed interpreter start with setsid. Never
+        # infer a group from the current parent: a recycled leader could own that PGID.
+        def signal_group(target, sig):
+            if _pid_recycled(target, started_at):
+                raise ProcessLookupError(target)
+            if os.getpgid(target) == target and target != os.getpgrp():
+                os.killpg(target, sig)  # windows-footgun: ok — POSIX only, gated above
+                return
+            # Not an isolated group leader (a legacy row, a tool process): signalling that
+            # group would hit unrelated processes. Fall back to the single pid — the same
+            # target the pre-group-kill reclaim used, so a non-leader is still reaped.
+            os.kill(target, sig)
+        kill = signal_group
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         # Never signal by bare number: a dead PID is "gone" (reclaim proceeds), a live one is held.
         info["signal_refused"] = True
@@ -483,11 +506,10 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
         "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
         (int(time.time()) - TERMINAL_WORKER_REAP_GRACE_SECONDS,),
     ).fetchall()
-    host_prefix = _kb._host_prefix()
     reaped: list[str] = []
     for row in rows:
         try:
-            _reap_terminal_worker_row(conn, row, host_prefix, signal_fn, reaped)
+            _reap_terminal_worker_row(conn, row, signal_fn, reaped)
         except Exception:
             _kb._log.debug(
                 "kanban dispatch: terminal worker reap failed for run %s (task %s)",
@@ -496,9 +518,9 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
     return reaped
 
 
-def _reap_terminal_worker_row(conn, row, host_prefix: str, signal_fn, reaped: list[str]) -> None:
+def _reap_terminal_worker_row(conn, row, signal_fn, reaped: list[str]) -> None:
     pid, fingerprint = int(row["worker_pid"]), row["worker_started_at"]
-    if pid == os.getpid() or not str(row["claim_lock"] or "").startswith(host_prefix):
+    if pid == os.getpid() or not _claim_is_local(row["claim_lock"], pid, fingerprint):
         return
     if fingerprint == UNVERIFIED_WORKER_FINGERPRINT and _kb._pid_alive(pid):
         return  # unproven identity: never signalled; its evidence is cleared once the pid is gone
@@ -1483,22 +1505,38 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int, *, run_id=
         _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
 
 
-def adopt_worker_pid(conn: sqlite3.Connection, task_id: str, run_id: int, pid: int) -> bool:
+def adopt_worker_pid(conn: sqlite3.Connection, task_id: str, run_id: int, pid: int, *,
+                     claim_lock: str = "") -> bool:
     """Worker-side half of ``_set_worker_pid``, run by the worker before its first model call.
 
     A dispatcher killed between spawning the worker and ``_set_worker_pid`` leaves the run with no
     pid: no liveness check can see the worker, so a TTL expiry reclaims the card and spawns a second
     worker beside it. The worker fills the missing pid itself (``worker_registered``). False when
     ``run_id`` is no longer the card's live run: the card was reclaimed before this worker got here,
-    and it must exit without working it."""
+    and it must exit without working it.
+
+    ``claim_lock`` is the claim the caller was told to adopt. When it is supplied it must still be
+    the row's claim — a worker whose claim was replaced in the meantime must not take the row over.
+    When it is absent the caller has no claim to prove (a worker whose environment carries no
+    ``HERMES_KANBAN_CLAIM_LOCK``), and the row's own claim is used instead; it must then be
+    host-local for the pid to be recorded, so a claim made on another machine is never adopted.
+    """
     started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
-    with _kb.write_txn(conn):
+    with _kb.write_txn(conn, allow_nested=True):
         row = conn.execute("SELECT status, current_run_id, worker_pid, claim_lock FROM tasks WHERE id = ?",
                            (task_id,)).fetchone()
         if row is None or row["status"] != "running" or row["current_run_id"] != int(run_id):
             return False
-        # Liveness checks are host-local: a pid from another host (or pid namespace) proves nothing here.
-        if row["worker_pid"] is None and (row["claim_lock"] or "").startswith(_kb._host_prefix()):
+        if claim_lock:
+            if row["claim_lock"] != claim_lock:
+                return False
+        elif not str(row["claim_lock"] or "").startswith(_kb._host_prefix()):
+            # No claim to compare against and the row's claim belongs to another host:
+            # adopt nothing, but the run is still ours to work.
+            return True
+        # A bound interpreter supersedes the submitter as the run's signal target. The
+        # spawn event retains the submitter's identity for its independent watcher.
+        if _claim_is_local(row["claim_lock"], pid, started_at):
             conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
                          (int(pid), started_at, task_id))
             conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
