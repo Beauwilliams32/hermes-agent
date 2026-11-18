@@ -1154,6 +1154,23 @@ class LocalEnvironment(BaseEnvironment):
         if not _IS_WINDOWS:
             # The command dies with this process however it dies: a SIGKILLed / OOM-killed host left a
             # running `npm run dev` or `sleep` on init. Released once the wait returns (see below).
+            # TODO(R3.5 residual — named plumbing gap): the reclaim path's group kill reaches the
+            # worker's own process group, and this registration is what lets the worker-local
+            # owner-death supervisor (hermes_cli/process_identity.py) sweep the command's group when
+            # the worker dies — covered by
+            # tests/hermes_cli/test_kanban_reclaim_processes.py::
+            # test_reclaim_worker_death_reaps_detached_tool_group. What the reclaim still cannot
+            # reach is (a) a descendant that leaves this group on purpose (its own setsid/setpgid)
+            # and (b) a subprocess the worker started WITHOUT this registration — a raw
+            # subprocess.Popen outside this file (e.g. hermes_cli/bang_shell.py,
+            # hermes_cli/git_commit_graph.py, hermes_cli/browser_connect.py). The plumbing gap is
+            # that the supervised-group registry lives only in the dying worker's memory
+            # (process_identity._supervised_pgids) and is persisted nowhere the reclaim can read, so
+            # the reclaim cannot enumerate and sweep groups the worker never registered. Closing it
+            # means recording each registered tool pgid (with its start-time fingerprint) on the
+            # kanban run row at spawn time, so the reclaim can sweep them by number under the same
+            # PID-reuse guard the group kill uses. Not silently dropped: this is the residual
+            # escape the card asked to be named.
             own_process_groups([proc.pid])
             proc._hermes_owned_pgid = proc.pid
             with contextlib.suppress(ProcessLookupError):

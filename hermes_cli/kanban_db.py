@@ -2352,8 +2352,8 @@ def release_stale_claims(
             )
             continue
         with write_txn(conn):
-            # Again under the write lock: an interpreter that bound since the check above
-            # changes neither claim_lock nor worker_pid, so the CAS below cannot see it.
+            # Binding a managed interpreter replaces worker_pid; the CAS below sees it
+            # even when claim_lock is unchanged and cannot release an un-signalled worker.
             if owner_reclaim_blocked_after_kill(conn, row["id"], signalled=bool(termination.get("termination_attempted"))):
                 continue
             retry_status, error = _retry_status_for_run(conn, row["id"]), reclaim_error(conn, row["id"], row["claim_lock"])
@@ -2461,13 +2461,26 @@ def reclaim_task(
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
         row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
+    # R3.4: never release the claim of a worker we actually signalled that is still alive —
+    # a released claim spawns a second worker beside the survivor (the 2026-11-11 orphan
+    # push). A *refused* signal is different: the identity was never proven, so we cannot
+    # manage that worker anyway and an explicit operator reclaim stays a human override
+    # that releases the claim (and still sends nothing).
+    if termination.get("host_local") and termination.get("termination_attempted") \
+            and not termination.get("terminated"):
+        _defer_reclaim_for_live_worker(
+            conn, task_id, prev_lock, int(time.time()), termination,
+            reason=reason or "manual_reclaim_worker_alive",
+        )
+        return False
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(
             "UPDATE tasks SET status = ?, claim_lock = NULL, "
             "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
-            "AND claim_lock IS ?", (retry_status, task_id, prev_lock),
+            "AND claim_lock IS ? AND worker_pid IS ?",
+            (retry_status, task_id, prev_lock, row["worker_pid"]),
         )
         if cur.rowcount != 1:
             return False
